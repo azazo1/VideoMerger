@@ -7,7 +7,7 @@ import tkinter.filedialog as tkf
 import tkinter.ttk as ttk
 import threading
 import traceback
-
+from Constant import *
 from Merge import Merger
 
 from typing import List, Union
@@ -19,13 +19,16 @@ class UserFacer:
         self.root.title('MP4合并工具')
         self.root.geometry('530x350')
         self.root.update()
-        self.processMessage: List[str] = []
-        self.state: List[bool] = [False]
+        self.error: List[Exception] = []
+        self.processMessage: List[float] = []
+        self.state: List[bool] = [AVAILABLE_FOR_MERGING]
         self.defaultOutFile = 'out.mp4'
         self.outFile = self.defaultOutFile
         self.files = []
         self.getTextHeight = lambda px: px // 20
         self.cross = False
+        self.longFirst = False
+        self.merger: Merger = None
 
         tk.Label(self.root, text='输出文件')
         self.outFileFrame = tk.Frame(self.root)
@@ -39,19 +42,13 @@ class UserFacer:
         self.selectFilesButton = tk.Button(self.selectFilesButtonsFrame, command=self.selectFiles, text='选择文件')
         self.clearSelectButton = tk.Button(self.selectFilesButtonsFrame, command=self.clearSelect, text='清空选择')
         self.processBar = ttk.Progressbar(self.root, maximum=100)
-        self.startButton = tk.Button(self.root, command=self._thread_merge,
-                                     text='开始合并')
+        self.progressAnimate()
+        self.startButton = tk.Button(self.root, command=self._thread_merge, text='开始合并')
         self.menu = tk.Menu(self.root)
+
         self.menu.add_command(label='help', command=self.help)
         self.menu.add_command(label='Crossly', command=self.toggleCross)
-
-        # 绑定调整大小事件:ViewText缩放比例
-        self.root.bind('<Configure>', lambda *a: self.selectFilesViewText.configure(
-            height=self.getTextHeight(self.root.winfo_height() * 0.8)
-        ))
-        # 添加menu到root
-        self.root.config(menu=self.menu)
-
+        self.menu.add_command(label='LongFirst', command=self.toggleLongFirst)
         self._childrenPack(self.outFileFrame, side=tk.LEFT)
         self._childrenPack(self.selectFrame)
         self._childrenPack(self.selectFilesButtonsFrame, side=tk.LEFT)
@@ -61,6 +58,14 @@ class UserFacer:
         self.processBar.pack_configure(expand=True, fill=tk.X)
         self.selectFilesViewText.pack_configure(expand=True, fill=tk.BOTH)
         self.selectFrame.pack_configure(expand=True, fill=tk.BOTH)
+        # 绑定调整大小事件:ViewText缩放比例
+        self.root.bind('<Configure>', lambda *a: self.selectFilesViewText.configure(
+            height=self.getTextHeight(self.root.winfo_height() * 0.8)
+        ))
+        # 添加menu到root
+        self.root.config(menu=self.menu)
+        # 绑定点击事件：恢复进度条动画
+        self.root.bind('<Button-1>', lambda *a: (self.progressAnimate() if self.state[0] == AVAILABLE_FOR_MERGING else None))
 
     def toggleCross(self):
         """调整是否交叉写帧"""
@@ -70,7 +75,16 @@ class UserFacer:
             f'交叉写帧模式:{"开启" if self.cross else "关闭"}'
         )
 
-    def help(self):
+    def toggleLongFirst(self):
+        """调整是否严格模式"""
+        self.longFirst = not self.longFirst
+        tkm.showinfo(
+            '状态切换',
+            f'视频长度优先:{"最长" if self.longFirst else "最短"}'
+        )
+
+    @staticmethod
+    def help():
         tkm.showinfo(
             '使用帮助',
             """
@@ -90,6 +104,10 @@ class UserFacer:
                 3、交叉写帧模式：
                     多个文件间轮流写帧，而不是整个文件合并，
                     此功能仅供娱乐。
+                4、长度优先：
+                    在交叉写帧模式下，长度优先为”最长“则输出视频长度
+                    由被合并文件中的最长者决定，
+                    反之亦然，点击”LongFirst“切换最长最短优先。
             注意事项：
                 1、被合并文件不能是输出文件，否则输出视频可能乱码。
                 2、暂不支持同一文件多次合并，
@@ -134,16 +152,43 @@ class UserFacer:
         if s:
             self.files = list(filter(lambda a: a, [i.strip() for i in s.split(';')]))
 
-    def fillText(self, *a):
+    def fillText(self):
         self.selectFilesViewText.delete(0.0, tk.END)
         self.selectFilesViewText.insert(0.0, (';\n'.join(self.files) + ';') if self.files else '')
 
     def checkState(self):
-        if self.state[0]:
-            if tkm.askokcancel('合并完成',
-                               f'您的文件已保存到：{self.outFile}，是否打开文件？'):
+        if self.state[0] == MERGE_COMPLETED:
+            t = tkm.askyesnocancel('合并完成',
+                                   f'您的文件已保存到：{self.outFile}，是否打开文件？点击取消删除文件。')
+            if t:
                 os.system(self.outFile)
-            self.state[0] = False
+            elif t is None:
+                os.remove(self.outFile)
+            self.state[0] = AVAILABLE_FOR_MERGING
+            self.startButton.config(command=self._thread_merge, text='开始合并')  # 改变开始按钮状态
+        elif self.state[0] == START_MERGE:
+            self.progressAnimate(False)
+            self.startButton.config(command=lambda: self.shutdown(), text='中断合并')
+            self.state[0] = MERGING
+
+    def progressAnimate(self, start=True):
+        if start:
+            self.processBar.config(mode='indeterminate')
+            self.processBar.start()
+        else:
+            self.processBar.config(mode='determinate')
+            self.processBar.stop()
+
+    def shutdown(self):
+        """终端合并"""
+        try:
+            if tkm.askokcancel(
+                    '确认？',
+                    '是否要中断合并？操作无法撤销！'):
+                self.merger.alive = False
+                self.state[0] = AVAILABLE_FOR_MERGING
+        except Exception:
+            traceback.print_exc()
 
     def checkProcess(self, process: float = None):
         if process is not None and 0 <= process <= 1:  # 测试用
@@ -177,10 +222,19 @@ class UserFacer:
         threading.Thread(target=self.merge).start()
 
     def merge(self):
-        merger = Merger(self.outFile, *self.files, cross=self.cross)
-        merger.writeAllVideo(lambda n, t: self.processMessage.append(n / t))
-        self.state[0] = True
-        merger.close()
+        try:
+            self.state[0] = START_MERGE
+            self.merger = Merger(self.outFile, *self.files, cross=self.cross, longFirst=self.longFirst)
+            self.merger.writeAllVideo(lambda n, t: self.processMessage.append(n / t))
+            self.merger.close()
+            self.state[0] = MERGE_COMPLETED
+        except Exception as e:
+            self.error.append(e)
+
+    def checkError(self):
+        if self.error:
+            e = self.error.pop(0)
+            tkm.showerror(f'{type(e)}', f'{e}')
 
     def go(self):
         try:
@@ -189,7 +243,7 @@ class UserFacer:
                 self.root.update()
                 self.checkState()
                 self.checkProcess()
-
+                self.checkError()
         except tk.TclError as e:
             print(e, file=sys.stderr)
         except Exception:

@@ -1,0 +1,6 @@
+# coding=utf-8
+# statement
+START_MERGE = 3
+MERGING = 2
+MERGE_COMPLETED = 1
+AVAILABLE_FOR_MERGING = 0

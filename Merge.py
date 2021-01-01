@@ -5,18 +5,20 @@ import numpy as np
 
 
 class Merger:
-    def __init__(self, write_file: str, /, *files, cross=False):
+    def __init__(self, write_file: str, /, *files, cross=False, longFirst=False):
         """
 
         :param write_file:
         :param files:
         :param cross:  True：交叉写帧（帧画面交叉显现）；False：视频顺序写帧（视频完整）
         """
+        self.alive = True
         self.cross = cross
+        self.longFirst = longFirst
         self._files = list(files)
         self._videos = {}
         self.initFiles()
-        self.width, self.height, self.fps, self.totalFrames = self._getVideoInfo()
+        self.width, self.height, self.fps, (self.totalFrames, self.countFrames) = self._getVideoInfo()
         self.writer = cv2.VideoWriter(write_file, cv2.VideoWriter_fourcc('m', 'p', '4', 'v'), self.fps,
                                       (self.width, self.height))
 
@@ -34,9 +36,14 @@ class Merger:
 
     def writeAllVideo(self, report=lambda now, total: None, end=lambda *a, **k: None):
         gen = self.ordinarilyGenerateFrames() if not self.cross else self.crosslyGenerateFrames()
-        for t, frame in enumerate(gen):
+        if not self.cross or self.longFirst:
+            total = self.totalFrames
+        else:
+            total = min(self.countFrames) * len(self.countFrames)
+
+        for now, frame in enumerate(gen):
             self.writeFrame(frame)
-            report(t, self.totalFrames)
+            report(min(now, total - 1), total)
         end()
 
     def initFiles(self):
@@ -51,31 +58,46 @@ class Merger:
         width = int(v.get(cv2.CAP_PROP_FRAME_WIDTH))
         fps = int(v.get(cv2.CAP_PROP_FPS))
         totalFrames = 0
+        countFrames = []
         for v in vs:
-            totalFrames += v.get(cv2.CAP_PROP_FRAME_COUNT)
-        return width, height, fps, totalFrames
+            t = v.get(cv2.CAP_PROP_FRAME_COUNT)
+            totalFrames += t
+            countFrames.append(t)
+        return width, height, fps, (totalFrames, countFrames)
 
     def crosslyGenerateFrames(self):
         """It will pop videos out."""
-        success = True
-        while success:
-            for name, video in self._videos.items():
-                print(f'Reading:{name}...')
-                video: cv2.VideoCapture
-                success, frame = video.read()
-                if success:
-                    yield frame
-                else:
-                    break
-        print('Reading Completed!')
-        self._videos.clear()
+        fail = set()
+        try:
+            while self.alive:
+                for name, video in self._videos.items():
+                    video: cv2.VideoCapture
+                    success, frame = video.read()
+                    if self.longFirst:
+                        if len(fail) == len(self._videos):  # 长视频优先，视频长度由最长决定
+                            return
+                        elif not success:
+                            print(f'Read {name} Over')
+                            fail.add(video)
+                        else:
+                            yield frame
+                    else:
+                        if success:  # 短视频优先，视频长度由最短决定
+                            yield frame
+                        else:
+                            return
+            print('Reading Completed!')
+        except Exception as e:
+            raise e
+        finally:
+            self.close()
 
     def ordinarilyGenerateFrames(self):
         """It will pop videos out."""
         for name, video in self._videos.items():
             print(f'Reading:{name}...')
             success, frame = video.read()
-            while success:
+            while self.alive and success:
                 yield frame
                 success, frame = video.read()
         print('Reading Completed!')
@@ -87,6 +109,7 @@ class Merger:
         self._videos.setdefault(f, cv2.VideoCapture(f))
 
     def close(self):
+        self.alive = False
         try:
             self.writer.release()
         except AttributeError:
